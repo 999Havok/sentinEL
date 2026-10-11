@@ -1,8 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
-project(SentinEL C CXX)   # LLVMConfig.cmake runs a C header check
 
-# Use the Homebrew LLVM installation (never Apple's clang).
+# Use the Homebrew LLVM installation (never Apple's clang). The compilers
+# must be chosen before project().
 set(SENTINEL_LLVM_PREFIX "/opt/homebrew/opt/llvm" CACHE PATH "LLVM install prefix")
+if(NOT CMAKE_C_COMPILER)
+  set(CMAKE_C_COMPILER "${SENTINEL_LLVM_PREFIX}/bin/clang")
+endif()
+if(NOT CMAKE_CXX_COMPILER)
+  set(CMAKE_CXX_COMPILER "${SENTINEL_LLVM_PREFIX}/bin/clang++")
+endif()
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+project(SentinEL C CXX)   # C is needed: LLVMConfig.cmake runs a C header check
 list(APPEND CMAKE_PREFIX_PATH "${SENTINEL_LLVM_PREFIX}")
 
 find_package(LLVM REQUIRED CONFIG)
