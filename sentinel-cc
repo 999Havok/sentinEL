@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# sentinel-cc: drop-in replacement for clang that refuses to build insecure C.
+#
+#   sentinel-cc [--sentinel-warn-only] <normal clang arguments>
+#
+# Adds to the user's arguments:
+#   -fplugin=SentinelAST.dylib       front end: banned unsafe calls (our check)
+#   -fpass-plugin=SentinelIR.dylib   middle end: double-free / use-after-free (our check)
+#   -g                               so IR findings carry file:line:col
+#   -Werror=uninitialized            Clang's OWN existing -Wuninitialized
+#                                    check, promoted to an error (not ours)
+#   -isysroot <macOS SDK>            only if the user gave no sysroot
+#
+# --sentinel-warn-only reports the same problems as warnings and still
+# produces output.
+
+set -euo pipefail
+
+LLVM_PREFIX="${SENTINEL_LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
+CLANG="$LLVM_PREFIX/bin/clang"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIBDIR="${SENTINEL_LIB_DIR:-$HERE/build/lib}"
+AST_PLUGIN="$LIBDIR/SentinelAST.dylib"
+IR_PLUGIN="$LIBDIR/SentinelIR.dylib"
+
+for f in "$CLANG" "$AST_PLUGIN" "$IR_PLUGIN"; do
+  if [[ ! -e "$f" ]]; then
+    echo "sentinel-cc: missing $f (did you run the CMake build?)" >&2
+    exit 2
+  fi
+done
+
+warn_only=0
+have_sysroot=0
+user_args=()
+for a in "$@"; do
+  case "$a" in
+    --sentinel-warn-only) warn_only=1 ;;
+    -isysroot|-isysroot*|--sysroot|--sysroot=*) have_sysroot=1; user_args+=("$a") ;;
+    *) user_args+=("$a") ;;
+  esac
+done
+
+extra=(-fplugin="$AST_PLUGIN" -fpass-plugin="$IR_PLUGIN" -g -Wuninitialized)
+
+if [[ $warn_only -eq 1 ]]; then
+  extra+=(-fplugin-arg-sentinel-warn-only)
+  export SENTINEL_WARN_ONLY=1
+else
+  extra+=(-Werror=uninitialized)
+  unset SENTINEL_WARN_ONLY
+fi
+
+# Homebrew clang does not always find the macOS SDK (stdio.h etc.) by itself.
+if [[ $have_sysroot -eq 0 && -z "${SDKROOT:-}" ]]; then
+  extra+=(-isysroot "$(xcrun --show-sdk-path)")
+fi
+
+exec "$CLANG" "${extra[@]}" ${user_args[@]+"${user_args[@]}"}
