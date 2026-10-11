@@ -34,4 +34,4 @@ function(sentinel_plugin name)
 endfunction()
 
 sentinel_plugin(SentinelAST ast-plugin/SentinelAST.cpp)
-# sentinel_plugin(SentinelIR  ir-pass/SentinelIR.cpp)   (added in step 2)
+sentinel_plugin(SentinelIR  ir-pass/SentinelIR.cpp)

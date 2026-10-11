@@ -1,0 +1,245 @@
+//===- SentinelIR.cpp - SentinEL middle-end (LLVM IR) checker -----------===//
+//
+// A new-pass-manager plugin that finds, inside each function:
+//
+//   * double-free:     free(p) when p may already have been freed
+//   * use-after-free:  load / store / GEP through p when p may be freed
+//
+// Load with:  clang -fpass-plugin=SentinelIR.dylib ...
+// Warn-only:  set environment variable SENTINEL_WARN_ONLY=1
+//
+// Method: a forward "may-be-freed" data-flow analysis over basic blocks,
+// on SSA form (mem2reg is run on a private copy of the module first).
+//
+//===----------------------------------------------------------------------===//
+
+#include "llvm/ADT/StringSet.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/CFG.h"
+#include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Plugins/PassPlugin.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/PromoteMemToReg.h"
+
+#include <cstdlib>
+#include <map>
+#include <set>
+
+using namespace llvm;
+
+namespace {
+
+// The data-flow fact: the set of SSA pointer values that MAY have been
+// freed on some path reaching this point.
+using FreedSet = std::set<const Value *>;
+
+// Strip GEPs and casts so that p, &p[3] and (char *)p all map to p.
+const Value *baseOf(const Value *Ptr) { return getUnderlyingObject(Ptr); }
+
+// If I is a call to free(), return the pointer being freed.
+const Value *freedPointer(const Instruction &I) {
+  const auto *CB = dyn_cast<CallBase>(&I);
+  if (!CB)
+    return nullptr;
+  const Function *Callee = CB->getCalledFunction();
+  if (!Callee || Callee->getName() != "free" || CB->arg_size() != 1)
+    return nullptr;
+  return CB->getArgOperand(0);
+}
+
+// If I accesses memory through a pointer, return that pointer.
+const Value *accessedPointer(const Instruction &I) {
+  if (const auto *L = dyn_cast<LoadInst>(&I))
+    return L->getPointerOperand();
+  if (const auto *S = dyn_cast<StoreInst>(&I))
+    return S->getPointerOperand();
+  if (const auto *G = dyn_cast<GetElementPtrInst>(&I))
+    return G->getPointerOperand();
+  return nullptr;
+}
+
+// "file.c:12:5" from the -g debug location, or "" if there is none.
+std::string locString(const Instruction &I) {
+  const DebugLoc &DL = I.getDebugLoc();
+  if (!DL)
+    return "";
+  return (DL->getFilename() + ":" + Twine(DL->getLine()) + ":" +
+          Twine(DL->getColumn()))
+      .str();
+}
+
+std::string lineOf(const Instruction *I) {
+  if (I && I->getDebugLoc())
+    return "line " + std::to_string(I->getDebugLoc()->getLine());
+  return "an earlier point";
+}
+
+class FreeChecker {
+public:
+  FreeChecker(Function &F, bool WarnOnly) : F(F), WarnOnly(WarnOnly) {}
+
+  void run() {
+    // Remember where each pointer is freed (only used in messages).
+    for (Instruction &I : instructions(F))
+      if (const Value *P = freedPointer(I))
+        FreeSite.emplace(baseOf(P), &I);
+
+    // 1) Iterate to a fixpoint without reporting.
+    //    OUT[B] = transfer(B, IN[B]);  IN[B] = union of OUT[pred].
+    bool Changed = true;
+    while (Changed) {
+      Changed = false;
+      for (BasicBlock &BB : F) {
+        FreedSet Out = computeIn(BB);
+        transfer(BB, Out, /*Report=*/false);
+        if (Out != OutSets[&BB]) {
+          OutSets[&BB] = std::move(Out);
+          Changed = true;
+        }
+      }
+    }
+
+    // 2) One final walk with the stable IN sets, reporting problems.
+    for (BasicBlock &BB : F) {
+      FreedSet S = computeIn(BB);
+      transfer(BB, S, /*Report=*/true);
+    }
+  }
+
+private:
+  // IN[B] = union of OUT[P] for every predecessor P (a "may" analysis:
+  // freed on ANY incoming path counts as possibly freed).
+  FreedSet computeIn(BasicBlock &BB) {
+    FreedSet In;
+    for (BasicBlock *Pred : predecessors(&BB)) {
+      const FreedSet &PO = OutSets[Pred];
+      In.insert(PO.begin(), PO.end());
+    }
+    // A phi node merges pointers from different paths:
+    //   p2 = phi [p0, %then], [p1, %else]
+    // p2 is possibly freed if the value arriving on some edge was freed on
+    // that edge.
+    for (PHINode &Phi : BB.phis()) {
+      In.erase(&Phi); // the phi gets a fresh value each time BB runs
+      for (unsigned I = 0; I < Phi.getNumIncomingValues(); ++I) {
+        const FreedSet &PO = OutSets[Phi.getIncomingBlock(I)];
+        if (PO.count(baseOf(Phi.getIncomingValue(I))))
+          In.insert(&Phi);
+      }
+    }
+    return In;
+  }
+
+  // Walk the instructions of BB in order, updating the freed set S.
+  void transfer(BasicBlock &BB, FreedSet &S, bool Report) {
+    for (Instruction &I : BB) {
+      if (const Value *P = freedPointer(I)) {
+        const Value *B = baseOf(P);
+        if (Report && S.count(B))
+          report(I, "double-free",
+                 "pointer may already have been freed (at " +
+                     lineOf(otherFreeSite(B, &I)) + ")",
+                 "MEM30-C: set the pointer to NULL after free");
+        S.insert(B);
+      } else if (const Value *P = accessedPointer(I)) {
+        const Value *B = baseOf(P);
+        if (Report && S.count(B))
+          report(I, "use-after-free",
+                 "memory accessed through a pointer that may have been freed (at " +
+                     lineOf(otherFreeSite(B, nullptr)) + ")",
+                 "MEM30-C: do not access freed memory");
+      }
+      // In a loop an instruction can run again and produce a NEW value
+      // (e.g. p = malloc(...) on the next iteration), which is not freed.
+      S.erase(&I);
+    }
+  }
+
+  // A free() of B other than Current (for "previously freed at line N").
+  const Instruction *otherFreeSite(const Value *B, const Instruction *Current) {
+    auto Range = FreeSite.equal_range(B);
+    for (auto It = Range.first; It != Range.second; ++It)
+      if (It->second != Current)
+        return It->second;
+    return Current; // freed by the same free() on an earlier loop iteration
+  }
+
+  void report(const Instruction &I, StringRef Kind, const std::string &What,
+              StringRef Rule) {
+    std::string Loc = locString(I);
+    // Report each kind at most once per source line, so p->x = 1 (a GEP
+    // plus a store) gives one error, not two.
+    std::string Key = Kind.str() + "@" +
+                      (I.getDebugLoc() ? lineOf(&I)
+                                       : std::to_string((uintptr_t)&I));
+    if (!Reported.insert(Key).second)
+      return;
+
+    std::string Msg = (Loc.empty() ? "" : Loc + ": ") + "[SentinEL] " +
+                      Kind.str() + " in function '" + F.getName().str() +
+                      "': " + What + " (CERT " + Rule.str() + ")";
+    LLVMContext &Ctx = F.getContext();
+    if (WarnOnly)
+      Ctx.diagnose(DiagnosticInfoGeneric(Msg, DS_Warning));
+    else
+      Ctx.emitError(Msg);
+  }
+
+  Function &F;
+  bool WarnOnly;
+  std::map<const BasicBlock *, FreedSet> OutSets;
+  std::multimap<const Value *, const Instruction *> FreeSite;
+  StringSet<> Reported;
+};
+
+// Turn stack variables (allocas) into SSA registers: the "mem2reg" step.
+// After this, "p = malloc(); free(p); p = malloc();" gives two different
+// SSA values for the two mallocs, which is what makes the analysis precise.
+void promoteToSSA(Function &F) {
+  std::vector<AllocaInst *> Allocas;
+  for (Instruction &I : F.getEntryBlock())
+    if (auto *AI = dyn_cast<AllocaInst>(&I))
+      if (isAllocaPromotable(AI))
+        Allocas.push_back(AI);
+  if (Allocas.empty())
+    return;
+  DominatorTree DT(F);
+  PromoteMemToReg(Allocas, DT);
+}
+
+struct SentinelPass : PassInfoMixin<SentinelPass> {
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
+    bool WarnOnly = std::getenv("SENTINEL_WARN_ONLY") != nullptr;
+    // Work on a private copy so the user's program (e.g. an -O0 debug build)
+    // is compiled exactly as before; we only read the copy.
+    std::unique_ptr<Module> Copy = CloneModule(M);
+    for (Function &F : *Copy) {
+      if (F.isDeclaration())
+        continue;
+      promoteToSSA(F);
+      FreeChecker(F, WarnOnly).run();
+    }
+    return PreservedAnalyses::all();
+  }
+  static bool isRequired() { return true; } // run even on optnone functions
+};
+
+} // namespace
+
+extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
+  return {LLVM_PLUGIN_API_VERSION, "SentinelIR", "1.0", [](PassBuilder &PB) {
+            // PipelineStart runs at every -O level, including -O0, before
+            // any optimisation has changed the code.
+            PB.registerPipelineStartEPCallback(
+                [](ModulePassManager &MPM, OptimizationLevel) {
+                  MPM.addPass(SentinelPass());
+                });
+          }};
+}
