@@ -1,0 +1,9 @@
+opt,config,avg_ms_per_set,stdev_ms,avg_ms_per_file,overhead_vs_clang_pct,overhead_vs_clang_g_pct
+-O0,clang,161.34,11.13,23.05,0.00,-1.24
+-O0,clang -g,163.36,9.84,23.34,1.25,0.00
+-O0,clang+plugins,164.52,2.17,23.50,1.97,0.71
+-O0,sentinel-cc,194.66,2.95,27.81,20.65,19.16
+-O2,clang,173.40,10.02,24.77,0.00,1.21
+-O2,clang -g,171.32,3.56,24.47,-1.20,0.00
+-O2,clang+plugins,175.01,3.30,25.00,0.93,2.15
+-O2,sentinel-cc,204.99,2.79,29.28,18.22,19.65
