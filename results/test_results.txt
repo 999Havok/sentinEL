@@ -3,9 +3,11 @@ FILE                             EXPECTED         ACTUAL                   RESUL
 bad/banned_gets_scanf.c          REJECTED(AST)    REJECTED(AST)            PASS
 bad/banned_strcpy_sprintf.c      REJECTED(AST)    REJECTED(AST)            PASS
 bad/double_free_branch.c         REJECTED(IR)     REJECTED(IR)             PASS
+bad/double_free_realloc.c        REJECTED(IR)     REJECTED(IR)             PASS
 bad/double_free_simple.c         REJECTED(IR)     REJECTED(IR)             PASS
 bad/uaf_in_loop.c                REJECTED(IR)     REJECTED(IR)             PASS
 bad/uaf_one_branch.c             REJECTED(IR)     REJECTED(IR)             PASS
+bad/uaf_realloc.c                REJECTED(IR)     REJECTED(IR)             PASS
 bad/uaf_simple.c                 REJECTED(IR)     REJECTED(IR)             PASS
 bad/uninit_branch.c              REJECTED(UNINIT) REJECTED(UNINIT)         PASS
 bad/uninit_simple.c              REJECTED(UNINIT) REJECTED(UNINIT)         PASS
@@ -15,6 +17,7 @@ good/free_other_branch.c         ACCEPTED         ACCEPTED                 PASS
 good/free_then_reassign.c        ACCEPTED         ACCEPTED                 PASS
 good/init_both_branches.c        ACCEPTED         ACCEPTED                 PASS
 good/linked_list.c               ACCEPTED         ACCEPTED                 PASS
+good/realloc_reassign.c          ACCEPTED         ACCEPTED                 PASS
 good/safe_string_io.c            ACCEPTED         ACCEPTED                 PASS
 
-Total: 16   Passed: 16   Failed: 0
+Total: 19   Passed: 19   Failed: 0
