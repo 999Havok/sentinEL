@@ -110,10 +110,11 @@ warning for `gets`. Source-snippet lines are omitted above.)
 This compiles every file in `tests/bad/` (must be rejected **by the expected
 check**) and `tests/good/` (must be accepted with no SentinEL diagnostics). It
 prints a table and saves it to `results/test_results.txt`. Current result:
-**16 / 16 pass** (9 bad, 7 good). The good programs include tricky cases that
+**19 / 19 pass** (11 bad, 8 good). The good programs include tricky cases that
 must *not* be flagged: free followed by a new malloc, free on one branch with
 use only on the other branch, malloc/free inside a loop, free then `p = NULL`
-with a guarded use, and list teardown.
+with a guarded use, list teardown, and `p = realloc(p, n)` plus the
+`tmp = realloc(p, n); if (!tmp) free(p);` failure path.
 
 ## Benchmark
 

@@ -306,6 +306,24 @@ function, which is a finite set, and they only grow as iteration proceeds
 (union and gen are monotone). Each OUT set can only grow a finite number of
 times, so the loop stops.
 
+**`realloc`:** `realloc(p, n)` and `reallocarray(p, n, size)` are a "gen"
+for `p`, exactly like `free(p)`: on success the old block is released and
+only the returned pointer is valid (CERT MEM30-C). The returned pointer is a
+new SSA value, so `p = realloc(p, n)` followed by `p[0] = 'x'` is fine. On
+failure `realloc` returns `NULL` and leaves `p` alone, so the correct idiom
+
+```c
+char *tmp = realloc(p, n);
+if (tmp == NULL) { free(p); return 1; }
+p = tmp;
+```
+
+must not be flagged. To handle it, the set that flows along a CFG edge is
+`OUT[pred]`, except when `pred` ends in `br (icmp eq/ne %tmp, null)` and
+`%tmp` is a `realloc` result: on the edge where `%tmp` is `NULL`, the old
+pointer is removed from the set. This is the analysis's only
+branch-sensitive step.
+
 ### Worked example: `tests/bad/uaf_one_branch.c`
 
 Real IR after mem2reg (abridged):
